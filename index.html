@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>私董会 AI 助手（第二阶段）</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .row { display: flex; gap: 16px; align-items: flex-start; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; flex: 1; }
+    .warning { color: red; font-weight: bold; }
+    button { margin-right: 6px; margin-top: 4px; }
+    ul { max-height: 220px; overflow-y: auto; }
+    .small { font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <h2>私董会 AI 工具（Phase 2）</h2>
+
+  <div class="card">
+    <label>会议主题：</label>
+    <input id="topic" style="width: 50%" placeholder="输入今天私董会主题" />
+    <button onclick="startMeeting()">开始</button>
+    <button onclick="pauseMeeting()">暂停</button>
+    <button onclick="restartMeeting()">重启</button>
+    <button onclick="endMeeting()">结束</button>
+    <p>当前状态：<span id="state">IDLE</span></p>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h3>知识库管理（NotebookLM风格简化）</h3>
+      <input id="doc_title" placeholder="文档标题" />
+      <select id="doc_type"><option value="link">link</option><option value="local">local</option></select>
+      <input id="doc_value" style="width:45%" placeholder="链接或本地标识" />
+      <button onclick="addDoc()">导入文档</button>
+      <ul id="docs"></ul>
+      <button onclick="saveSelectedDocs()">保存本次启用文档</button>
+    </div>
+
+    <div class="card">
+      <h3>OpenRouter 配置</h3>
+      <input id="model" value="qwen/qwen3-32b" style="width:60%" />
+      <input id="temperature" value="0.6" style="width:60px" />
+      <input id="max_tokens" value="240" style="width:80px" />
+      <button onclick="saveConfig()">保存配置</button>
+      <p class="small">需在服务端环境变量设置 OPENROUTER_API_KEY 才会真实调用模型。</p>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h3>实时记录</h3>
+      <input id="speaker" placeholder="发言人" />
+      <input id="speech" style="width:60%" placeholder="输入发言文本（模拟语音转写）" />
+      <button onclick="sendSpeech()">提交发言</button>
+      <ul id="transcripts"></ul>
+    </div>
+    <div class="card">
+      <h3>小虎实时提问</h3>
+      <ul id="prompts"></ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>会议纪要</h3>
+    <pre id="summary"></pre>
+  </div>
+
+<script>
+async function api(path, method='GET', body=null){
+  const res = await fetch(path, {
+    method,
+    headers: {'Content-Type':'application/json'},
+    body: body ? JSON.stringify(body): null
+  });
+  if(!res.ok){ alert(await res.text()); throw new Error('request failed'); }
+  return await res.json();
+}
+
+async function refresh(){
+  const s = await api('/api/session');
+  document.getElementById('state').innerText = s.state;
+
+  const t = document.getElementById('transcripts'); t.innerHTML='';
+  s.transcripts.forEach(x=>{
+    const li = document.createElement('li');
+    li.innerText = `[${new Date(x.timestamp).toLocaleTimeString()}] ${x.speaker}: ${x.text}`;
+    t.appendChild(li);
+  });
+
+  const p = document.getElementById('prompts'); p.innerHTML='';
+  s.prompts.slice().reverse().forEach(x=>{
+    const li = document.createElement('li');
+    li.innerText = x.content + (x.sources?.length ? `\n依据: ${x.sources.join(' | ')}` : '');
+    if(x.severity==='warning'){ li.className='warning'; }
+    p.appendChild(li);
+  });
+
+  const docs = await api('/api/docs');
+  const d = document.getElementById('docs'); d.innerHTML='';
+  docs.forEach(doc=>{
+    const li = document.createElement('li');
+    li.innerHTML = `<input type='checkbox' ${s.selected_docs.includes(doc.doc_id)?'checked':''} data-doc='${doc.doc_id}' /> ${doc.title} (${doc.source_type}) <button onclick="deleteDoc('${doc.doc_id}')">删除</button>`;
+    d.appendChild(li);
+  });
+}
+
+async function startMeeting(){
+  const topic = document.getElementById('topic').value;
+  const checked = [...document.querySelectorAll("#docs input[type='checkbox']:checked")].map(x=>x.dataset.doc);
+  await api('/api/start', 'POST', {topic, selected_docs: checked, use_web_search: true});
+  refresh();
+}
+async function pauseMeeting(){ await api('/api/pause','POST'); refresh(); }
+async function restartMeeting(){ await api('/api/restart','POST'); refresh(); }
+async function endMeeting(){
+  const result = await api('/api/end','POST');
+  document.getElementById('summary').innerText = JSON.stringify(result, null, 2);
+  refresh();
+}
+async function sendSpeech(){
+  await api('/api/speech','POST', {
+    speaker: document.getElementById('speaker').value || '成员',
+    text: document.getElementById('speech').value
+  });
+  document.getElementById('speech').value='';
+  refresh();
+}
+
+async function addDoc(){
+  await api('/api/docs','POST', {
+    title: document.getElementById('doc_title').value,
+    source_type: document.getElementById('doc_type').value,
+    source_value: document.getElementById('doc_value').value
+  });
+  refresh();
+}
+async function deleteDoc(id){ await api(`/api/docs/${id}`, 'DELETE'); refresh(); }
+async function saveSelectedDocs(){
+  const checked = [...document.querySelectorAll("#docs input[type='checkbox']:checked")].map(x=>x.dataset.doc);
+  await api('/api/docs/select', 'POST', {doc_ids: checked});
+  refresh();
+}
+
+async function saveConfig(){
+  await api('/api/config/openrouter', 'POST', {
+    model: document.getElementById('model').value,
+    temperature: Number(document.getElementById('temperature').value),
+    max_tokens: Number(document.getElementById('max_tokens').value)
+  });
+  alert('OpenRouter配置已保存');
+}
+
+refresh();
+</script>
+</body>
+</html>
